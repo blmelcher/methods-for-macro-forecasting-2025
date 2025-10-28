@@ -24,36 +24,38 @@ df$date <- as.Date(paste0(df$date, "-01")) # format date
 df <- df %>% filter(date <= as.Date("2025-07-01")) # until 01.10.2025
 
 # inflate CPI to get inflation rate
-df$inflation <- (df$cpi - dplyr::lag(df$cpi, 1)) / dplyr::lag(df$cpi, 1) 
+df$inflation <- 100*(df$cpi - dplyr::lag(df$cpi, 1)) / dplyr::lag(df$cpi, 1) 
 df <- df %>% filter(!is.na(inflation)) #remove first NA row
 
+# gdp growth instead of gdp
+df$gdp <- log(df$gdp)
 # -------------------- apply log + growth transformations --------------------
 # define the rate variables (do NOT log-transform these)
 rate_variables <- c("inflation", "urilo", "srate", "srate_ge")
 
 # safe log: add small offset if non-positive values present
-safe_log <- function(x, tiny = 1e-6) {
-  x_num <- as.numeric(x)
-  if (all(is.na(x_num))) return(x_num)
-  if (any(x_num <= 0, na.rm = TRUE)) {
-    offset <- abs(min(x_num, na.rm = TRUE)) + tiny
-    warning("Non-positive values found; adding offset = ", signif(offset, 6), " before log.")
-    x_num <- x_num + offset
-  }
-  return(log(x_num))
-}
+#safe_log <- function(x, tiny = 1e-6) {
+#  x_num <- as.numeric(x)
+#  if (all(is.na(x_num))) return(x_num)
+#  if (any(x_num <= 0, na.rm = TRUE)) {
+#    offset <- abs(min(x_num, na.rm = TRUE)) + tiny
+#    warning("Non-positive values found; adding offset = ", signif(offset, 6), " before log.")
+#    x_num <- x_num + offset
+#  }
+#  return(log(x_num))
+#}
 
 # apply log to non-rate variables (excluding date)
-for (var in names(df)) {
-  if (!(var %in% rate_variables) && var != "date") {
-    df[[var]] <- safe_log(df[[var]])
-  }
-}
+# (var in names(df)) {
+#  if (!(var %in% rate_variables) && var != "date") {
+#    df[[var]] <- safe_log(df[[var]])
+#  }
+#}
 
 # convert to growth rates (percent) for the same non-rate variables
 for (var in names(df)) {
   if (!(var %in% rate_variables) && var != "date") {
-    df[[var]] <- 100 * (df[[var]] - dplyr::lag(df[[var]], 1))
+    df[[var]] <-  (df[[var]] - dplyr::lag(df[[var]], 1))
   }
 }
 
@@ -61,48 +63,60 @@ for (var in names(df)) {
 # (subsequent code already removes rows with NA in gdp)
 
 #check if stationary using functions from stationary.R
-for (var in setdiff(colnames(df), "date")) {  # excluding date column
-  cat("Checking stationarity for:", var, "\n")
-  ts_data <- ts(df[[var]])
-  stationary_ts <- make_stationary(ts_data, use_log = TRUE)   # returns aligned vector (same length)
-  df[[var]] <- as.numeric(stationary_ts)                     # assign directly, no extra NA
-}
+#for (var in setdiff(colnames(df), "date")) {  # excluding date column
+#  cat("Checking stationarity for:", var, "\n")
+#  ts_data <- ts(df[[var]])
+#  stationary_ts <- make_stationary(ts_data, use_log = TRUE)   # returns aligned vector (same length)
+#  df[[var]] <- as.numeric(stationary_ts)                     # assign directly, no extra NA
+#}
 df <- df %>% filter(!is.na(gdp))  # remove first row with NA
 
 # ---------------------- lags ---------------------#
 
 # possible lags: 1, 4 (one year), 8 (two years)
-lags <- c(1, 4)
+lags <- c(1,4)
 
+# plot the forecast variables (save to files to avoid "figure margins too large")
+fv <- c("gdp", "inflation", "wkfreuro")
+dir.create("output/plots", recursive = TRUE, showWarnings = FALSE)
+for (v in fv) {
+  p <- ggplot(df, aes(x = date, y = .data[[v]])) +
+    geom_line() +
+    labs(title = v, x = "Date", y = v) +
+    theme_bw()
+  ggsave(
+    filename = file.path("output/plots", paste0("plot_", v, ".png")),
+    plot = p, width = 7, height = 4, dpi = 150
+  )
+}
 
 # ------------------ selected variables ------------------#
 
 #selected variables for BVAR model
 
-selected_variables_1 <- c("gdp", "cpi", "wkfreuro", "consp", "consg", 
+selected_variables_0 <- c("gdp", "inflation", "wkfreuro")
+
+selected_variables_1 <- c("gdp", "inflation", "wkfreuro", "consp", "consg", 
                           "ifix", "icnstr", "ime", "exc1", "imc1", "ltot", "uroff", "wage", 
-                          "srate", "poilusd", "wd", "pcioecd", "vaabcde", "vaghji")
+                          "srate", "poilusd", "pcioecd", "vaabcde", "vaghji")
 
 #from this initial set, we will also try a smaller set of variables
 
-selected_variables_2 <- c("gdp", "cpi", "wkfreuro", "consp", "consg", "ifix", 
+selected_variables_2 <- c("gdp", "inflation", "wkfreuro", "consp", "consg", "ifix", 
                           "exc1", "imc1", "ltot", "uroff", "wage", "srate", 
-                          "poilusd", "wd", "pcioecd")
+                          "poilusd", "pcioecd")
 
-selected_variables_3 <- c("gdp", "srate")
+selected_variables_3 <- c("gdp", "inflation", "wkfreuro", "consp", "exc1", "ltot",
+                          "wage", "srate")
 
 #-------------------------------------------------------------------
 # List of variable sets to test
 variable_sets <- list(
-  #set_1 = selected_variables_1,
-  #set_2 = selected_variables_2,
+  set_0 = selected_variables_0,
+  set_1 = selected_variables_1,
+  set_2 = selected_variables_2,
   set_3 = selected_variables_3
 )
-
-
-
-
-
 
 #--------------------- priors ---------------------#
 # Define different prior configurations to test
@@ -118,7 +132,7 @@ priors <- bv_priors(
   soc = soc
 )
 
-# Diffuse (flat) prior: approssimazione per OLS usando Minnesota con lambda molto piccolo
+# Diffuse (flat) prior: approximation to OLS using Minnesota with a very small lambda
 diffuse_prior_bv <- bv_priors(
   hyper = c("lambda", "alpha"),
   mn = bv_minnesota(
@@ -127,124 +141,132 @@ diffuse_prior_bv <- bv_priors(
   )
 )
 
-#priors
+# Priors based on predefined components (mn and soc)
 mn_prior_bv <- bv_priors(
   hyper = c("lambda", "alpha"),
   mn = mn
 )
 
 soc_prior_bv <- bv_priors(
-  hyper = c("lambda", "alpha", "psi"),
+  hyper = c("lambda", "alpha"),
   mn = mn,
   soc = soc
 )
 
-
-#list of priors
-#lista di prior pronta per essere passata a BVAR::bvar
+# List of priors ready to be passed to BVAR::bvar
 prior_configs <- list(
   mn      = mn_prior_bv,
-  soc     = soc_prior_bv,
-  diffuse = diffuse_prior_bv
+  soc     = soc_prior_bv
+  # diffuse = diffuse_prior_bv
 )
 
-rolling_window_size <- 60  # e.g., 60 quarters (15 years)
+rolling_window_size <- 110  # e.g., 40 quarters (10 years)
 
 #---------------------- end of setup ---------------------#
-compute_rmse <- function(data, variables, lags, prior, model_type = c("bvar", "var")) {
-  model_type <- match.arg(model_type)
-  errors_list <- list()
-  errors_matrix <- NULL
-  valid_windows <- 0
-  errors_summary <- character()
-  invalid_forecast_vars <- character()
+compute_bvar_rmse <- function(data, variables, lags, prior, window_size){
+  # Rolling window BVAR RMSE, returns a data frame per variable
+  horizon <- 1
+  n_obs <- nrow(data)
+
+  quantile_bands <- c("2.5%", "16%", "50%", "84%", "97.5%")
+  forecast_variables <- c("gdp", "inflation", "wkfreuro")
+
+  pred_q50 <- matrix(NA_real_, nrow = n_obs, ncol = length(variables),
+                     dimnames = list(NULL, variables))
   
-  seq_i <- seq(rolling_window_size, nrow(data) - 1)
-  for (i in seq_i) {
-    train <- data[(i - rolling_window_size + 1):i, variables, drop = FALSE]
-    test_row <- data[i + 1, variables, drop = FALSE]
+  for (i in seq(from = window_size + lags, to = n_obs - horizon)) {
+    train_start <- i - window_size + 1
+    train_end <- i
     
-    # coerce and validate training & test
-    train_num <- as.data.frame(lapply(train, as.numeric))
-    if (any(!is.finite(as.matrix(train_num))) || any(is.na(train_num))) {
-      errors_summary <- c(errors_summary, sprintf("window %d skipped: NA/non-finite in train", i))
-      next
-    }
-    if (nrow(train_num) <= max(1, lags)) {
-      errors_summary <- c(errors_summary, sprintf("window %d skipped: insufficient obs (n=%d)", i, nrow(train_num)))
-      next
-    }
-    test_vals <- as.numeric(test_row)
-    if (any(is.na(test_vals)) || any(!is.finite(test_vals))) {
-      errors_summary <- c(errors_summary, sprintf("window %d skipped: NA/non-finite in test", i))
-      next
-    }
+    y_train <- data[train_start:train_end, ]
     
-    # fit & forecast (capture any error)
-    if (model_type == "bvar") {
-      fit <- tryCatch(BVAR::bvar(data = train_num, lags = lags, priors = prior, ndraw = 1000, burnin = 500),
-                      error = function(e) { errors_summary <<- c(errors_summary, paste0("bvar error window ", i, ": ", conditionMessage(e))); NULL })
-      if (is.null(fit)) next
-      fc <- tryCatch(predict(fit, h = 1), error = function(e) { errors_summary <<- c(errors_summary, paste0("predict(bvar) error window ", i, ": ", conditionMessage(e))); NULL })
-      if (is.null(fc) || is.null(fc$fcst)) next
-      forecasted_mean <- sapply(fc$fcst, function(el) el$mean[1])
-    } else {
-      fit <- tryCatch(vars::VAR(train_num, p = max(1, lags), type = "const"),
-                      error = function(e) { errors_summary <<- c(errors_summary, paste0("VAR error window ", i, ": ", conditionMessage(e))); NULL })
-      if (is.null(fit)) next
-      fc <- tryCatch(predict(fit, n.ahead = 1, ci = 0.95),
-                     error = function(e) { errors_summary <<- c(errors_summary, paste0("predict(VAR) error window ", i, ": ", conditionMessage(e))); NULL })
-      if (is.null(fc) || is.null(fc$fcst)) next
-      forecasted_mean <- sapply(variables, function(v) {
-        m <- fc$fcst[[v]]
-        if (!is.null(m) && "fcst" %in% colnames(m)) return(as.numeric(m[1, "fcst"])) else return(NA_real_)
-      })
+    invisible(trained_model <- bvar(
+      y_train %>% dplyr::select(all_of(variables)),
+      lags = lags,
+      n_draw = 10000,
+      n_burn = 2500,
+      n_thin = 1,
+      priors = prior,
+      verbose = FALSE
+    ))
+    
+    prediction <- predict(trained_model, horizon = horizon, conf_bands = c(0.16, 0.025))
+    
+    pred_quants <- prediction$quants
+    mat <- matrix(NA_real_, nrow = length(variables), ncol = length(quantile_bands),
+                  dimnames = list(variables, quantile_bands))
+    
+    for (j in seq_along(variables)) {
+      mat[j, ] <- pred_quants[, 1, j]
     }
     
-    # validate forecasted values
-    if (any(is.na(forecasted_mean)) || any(!is.finite(forecasted_mean))) {
-      bad_vars <- variables[which(!is.finite(forecasted_mean) | is.na(forecasted_mean))]
-      invalid_forecast_vars <- unique(c(invalid_forecast_vars, bad_vars))
-      errors_summary <- c(errors_summary, sprintf("window %d: invalid forecast for vars: %s", i, paste(bad_vars, collapse = ",")))
-      next
-    }
-    
-    # accumulate errors
-    err <- forecasted_mean - test_vals
-    errors_matrix <- if (is.null(errors_matrix)) matrix(err, nrow = 1) else rbind(errors_matrix, err)
-    valid_windows <- valid_windows + 1
+    results <- as_tibble(mat, rownames = "variable") %>%
+      rename(
+        q025 = `2.5%`,
+        q16  = `16%`,
+        q50  = `50%`,
+        q84  = `84%`,
+        q975 = `97.5%`
+      )
+  
+    pred_q50[i+1, ] <- results$q50
+  }
+
+  res <- data.frame(
+    variable = forecast_variables,
+    rmse = numeric(length(forecast_variables))
+  )
+  
+  for (i in seq_along(forecast_variables)) {
+    var <- forecast_variables[i]
+    valid_indices <- which(!is.na(pred_q50[, var]))
+    rmse <- sqrt(mean((pred_q50[valid_indices, var] - data[valid_indices, var])^2))
+    res$rmse[i] <- rmse
   }
   
-  if (is.null(errors_matrix) || valid_windows == 0) {
-    return(list(rmse = NA_real_, valid_windows = valid_windows, invalid_forecast_vars = invalid_forecast_vars, errors_summary = errors_summary))
-  }
-  rmse_by_var <- sqrt(colMeans(errors_matrix^2))
-  overall_rmse <- mean(rmse_by_var)
-  return(list(rmse = overall_rmse, rmse_by_var = rmse_by_var, valid_windows = valid_windows, invalid_forecast_vars = invalid_forecast_vars, errors_summary = errors_summary))
+  return(res)
 }
 
 
 #–-------------------- BVAR/VAR RMSE computation ---------------------#
 
-results <- list()
+# data frame for results always add the new results at the end of the df, but also add columns with lags, variable set and prior used
 
-
+results_df <- data.frame(
+  variable = character(),
+  rmse = numeric(),
+  lags = integer(),
+  variable_set = character(),
+  prior = character(),
+  stringsAsFactors = FALSE
+)
 for (lag in lags) {
-  message("Testing lag: ", lag)
+  #print(paste("Testing lag:", lag))
   for (var_set_name in names(variable_sets)) {
-    vars <- variable_sets[[var_set_name]]
+    #cat("testing: ", var_set_name)
+    selected_vars <- variable_sets[[var_set_name]]
+    
     for (prior_name in names(prior_configs)) {
-      prior_conf <- prior_configs[[prior_name]]
-      model_type <- if (prior_name == "diffuse") "var" else "bvar"
-      res <- compute_rmse(data = df, variables = vars, lags = lag, prior = prior_conf, model_type = model_type)
+      cat("testing: ", lag, " ", var_set_name, " ",prior_name, "\n")
+      prior_config <- prior_configs[[prior_name]]
       
-      # store full result object
-      results[[paste(lag, var_set_name, prior_name, sep = "_")]] <- res
-      message(sprintf("Lag:%s VarSet:%s Prior:%s Model:%s -> RMSE:%s valid_windows:%d invalid_vars:%s",
-                      lag, var_set_name, prior_name, model_type,
-                      ifelse(is.na(res$rmse), "NA", format(res$rmse, digits = 6)),
-                      res$valid_windows,
-                      ifelse(length(res$invalid_forecast_vars)==0, "none", paste(res$invalid_forecast_vars, collapse=","))))
+      temp_results <- compute_bvar_rmse(
+        data = df,
+        variables = selected_vars,
+        lags = lag,
+        prior = prior_config,
+        window_size = rolling_window_size
+      )
+      temp_results$lags <- lag
+      temp_results$variable_set <- var_set_name
+      temp_results$prior <- prior_name
+      results_df <- rbind(results_df, temp_results)
+      
     }
   }
 }
+
+results_df
+# save results to the output folder
+save(results_df, file = "output/results_df.RData")
+
