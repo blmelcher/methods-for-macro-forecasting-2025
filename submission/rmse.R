@@ -339,3 +339,19 @@ results_df
 # save results to the output folder
 save(results_df, file = "output/results_df.RData")
 
+#save csv
+write.csv(results_df, file = "output/results")
+
+
+
+#analyze results
+results_summary <- results_df %>%
+  group_by(variable, lags, variable_set, prior) %>%
+  summarize(mean_rmse = mean(rmse), .groups = 'drop') 
+
+
+#print lowest rmse combination
+results_summary %>%
+  group_by(variable) %>%
+  slice_min(mean_rmse, n = 1) %>%
+  ungroup()
