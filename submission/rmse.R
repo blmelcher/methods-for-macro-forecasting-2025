@@ -74,21 +74,8 @@ df <- df %>% filter(!is.na(gdp))  # remove first row with NA
 # ---------------------- lags ---------------------#
 
 # possible lags: 1, 4 (one year), 8 (two years)
-lags <- c(1,4)
+lags <- c(1, 4)
 
-# plot the forecast variables (save to files to avoid "figure margins too large")
-fv <- c("gdp", "inflation", "wkfreuro")
-dir.create("output/plots", recursive = TRUE, showWarnings = FALSE)
-for (v in fv) {
-  p <- ggplot(df, aes(x = date, y = .data[[v]])) +
-    geom_line() +
-    labs(title = v, x = "Date", y = v) +
-    theme_bw()
-  ggsave(
-    filename = file.path("output/plots", paste0("plot_", v, ".png")),
-    plot = p, width = 7, height = 4, dpi = 150
-  )
-}
 
 # ------------------ selected variables ------------------#
 
@@ -156,8 +143,8 @@ soc_prior_bv <- bv_priors(
 # List of priors ready to be passed to BVAR::bvar
 prior_configs <- list(
   mn      = mn_prior_bv,
-  soc     = soc_prior_bv
-  # diffuse = diffuse_prior_bv
+  soc     = soc_prior_bv,
+  diffuse = diffuse_prior_bv
 )
 
 rolling_window_size <- 110  # e.g., 40 quarters (10 years)
@@ -222,6 +209,88 @@ compute_bvar_rmse <- function(data, variables, lags, prior, window_size){
     valid_indices <- which(!is.na(pred_q50[, var]))
     rmse <- sqrt(mean((pred_q50[valid_indices, var] - data[valid_indices, var])^2))
     res$rmse[i] <- rmse
+  }
+  
+  return(res)
+}
+
+compute_bvar_rmse <- function(data, variables, lags, prior, window_size){
+  
+  horizon <- 1
+
+  n_obs <- nrow(data)
+
+  quantile_bands <- c("2.5%", "16%", "50%", "84%", "97.5%")
+  # building a matrix to save results of q50
+  forecast_variables <- c("gdp", "inflation", "wkfreuro")
+
+  pred_q50 <- matrix(NA_real_, nrow = n_obs, ncol = length(variables),
+                     dimnames = list(NULL, variables))
+  
+  for (i in seq(from = window_size + lags, to = n_obs - horizon)) {
+    
+    train_start <- i - window_size + 1
+    train_end <- i
+    
+    # select the data for the rolling window
+    y_train <- data[train_start:train_end, ]
+    
+    # fitting model
+    invisible(trained_model <- bvar(
+      y_train %>% dplyr::select(all_of(variables)),
+      lags = lags,
+      n_draw = 10000,
+      n_burn = 2500,
+      n_thin = 1,
+      priors = prior,
+      verbose = FALSE
+    ))
+    
+    
+    prediction <- predict(trained_model, horizon = horizon, conf_bands = c(0.16, 0.025))
+    
+    # extract quantiles
+    pred_quants <- prediction$quants
+    mat <- matrix(NA_real_, nrow = length(variables), ncol = length(quantile_bands),
+                  dimnames = list(variables, quantile_bands))
+    
+    for (j in seq_along(variables)) {
+      mat[j, ] <- pred_quants[, 1, j]
+    }
+    
+    # save the results
+    results <- as_tibble(mat, rownames = "variable") %>%
+      rename(
+        q025 = `2.5%`,
+        q16  = `16%`,
+        q50  = `50%`,
+        q84  = `84%`,
+        q975 = `97.5%`
+      )
+  
+    pred_q50[i+1, ] <- results$q50
+    
+  }
+
+  # create a data frame with results (one column for variable, one for rmse one
+  res <- data.frame(
+    variable = forecast_variables,
+    rmse = numeric(length(forecast_variables))
+  )
+  
+  for (i in seq_along(forecast_variables)) {
+    
+    var <- forecast_variables[i]
+
+    cat(var, ": rmse: " )
+    valid_indices <- which(!is.na(pred_q50[, var]))
+    rmse <- sqrt(mean((pred_q50[valid_indices, var] - data[valid_indices, var])^2))
+    mae <- mean(abs(pred_q50[valid_indices, var] - data[valid_indices, var]))
+    
+    cat(rmse, "\n")
+    
+    res$rmse[i] <- rmse
+    
   }
   
   return(res)
